@@ -13,8 +13,28 @@ test("adjacent LED output branches remain collision-free", async () => {
   expect(solver.solved).toBe(true)
   expect(solver.failed).toBe(false)
 
-  const overlaps = solver.checkForOverlaps(solver.getOutputLayout())
+  const outputLayout = solver.getOutputLayout()
+  const overlaps = solver.checkForOverlaps(outputLayout)
   expect(overlaps).toHaveLength(0)
+
+  const outputPairs = solver.groundedLoadPairSolver!.groundedLoadPairs.filter(
+    (groundedLoadPair) => groundedLoadPair.mainChipId,
+  )
+  expect(outputPairs).toHaveLength(3)
+  const lowerPlacementYs = outputPairs.map((groundedLoadPair) => {
+    const upperPlacement =
+      outputLayout.chipPlacements[groundedLoadPair.upperChip.chipId]!
+    const lowerPlacement =
+      outputLayout.chipPlacements[groundedLoadPair.lowerChip.chipId]!
+    expect(upperPlacement.y).toBeGreaterThan(lowerPlacement.y)
+    expect(Math.abs(upperPlacement.x - lowerPlacement.x)).toBeLessThanOrEqual(
+      input.chipGap,
+    )
+    return lowerPlacement.y
+  })
+  expect(
+    Math.max(...lowerPlacementYs) - Math.min(...lowerPlacementYs),
+  ).toBeCloseTo(0)
 
   await expect(solver).toMatchSolverSnapshot(import.meta.path, {
     svgWidth: 1200,
