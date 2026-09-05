@@ -1,4 +1,3 @@
-import { boundsAreaOverlap } from "@tscircuit/math-utils"
 import type { ChipId, InputProblem, NetId } from "../../types/InputProblem"
 import type { Placement } from "../../types/OutputLayout"
 import { rotatePinOffset } from "../../utils/rotatePinOffset"
@@ -102,28 +101,69 @@ const getRowBounds = (
   }
 }
 
-const rowHasOverlappingPairs = (
-  groundedLoadPairs: GroundedLoadPair[],
+const haveVerticalClearance = (
+  firstBounds: GroundedLoadPairBounds,
+  secondBounds: GroundedLoadPairBounds,
+  minimumGap: number,
+): boolean =>
+  firstBounds.maxY + minimumGap <= secondBounds.minY ||
+  secondBounds.maxY + minimumGap <= firstBounds.minY
+
+const pairNeedsSeparation = (
+  firstPair: GroundedLoadPair,
+  secondPair: GroundedLoadPair,
   context: GroundedLoadRowContext,
 ): boolean => {
-  const pairBounds = groundedLoadPairs.map((groundedLoadPair) =>
-    getPairBounds(groundedLoadPair, context),
+  const { inputProblem } = context
+  const firstBounds = getPairBounds(firstPair, context)
+  const secondBounds = getPairBounds(secondPair, context)
+  const hasHorizontalClearance =
+    firstBounds.maxX + inputProblem.chipGap <= secondBounds.minX ||
+    secondBounds.maxX + inputProblem.chipGap <= firstBounds.minX
+  const hasVerticalClearance = haveVerticalClearance(
+    firstBounds,
+    secondBounds,
+    inputProblem.chipGap,
   )
-  for (let firstIndex = 0; firstIndex < pairBounds.length; firstIndex++) {
-    for (const secondBounds of pairBounds.slice(firstIndex + 1)) {
-      if (boundsAreaOverlap(pairBounds[firstIndex]!, secondBounds) > 0) {
-        return true
+
+  return !hasHorizontalClearance && !hasVerticalClearance
+}
+
+const getPairCollisionGroups = (
+  groundedLoadPairs: GroundedLoadPair[],
+  context: GroundedLoadRowContext,
+): GroundedLoadPair[][] => {
+  const remainingPairs = new Set(groundedLoadPairs)
+  const collisionGroups: GroundedLoadPair[][] = []
+
+  // Resolve connected collision groups independently so clear branches remain
+  // in their existing positions.
+  while (remainingPairs.size > 0) {
+    const firstPair = remainingPairs.values().next().value
+    if (!firstPair) break
+    remainingPairs.delete(firstPair)
+
+    const collisionGroup = [firstPair]
+    for (let pairIndex = 0; pairIndex < collisionGroup.length; pairIndex++) {
+      const pair = collisionGroup[pairIndex]!
+      for (const candidatePair of [...remainingPairs]) {
+        if (!pairNeedsSeparation(pair, candidatePair, context)) continue
+        remainingPairs.delete(candidatePair)
+        collisionGroup.push(candidatePair)
       }
+    }
+
+    if (collisionGroup.length >= MINIMUM_PAIRS_PER_ROW) {
+      collisionGroups.push(collisionGroup)
     }
   }
 
-  return false
+  return collisionGroups
 }
 
 const alignGroundedLoadPairRow = (
   groundedLoadPairs: GroundedLoadPair[],
   context: GroundedLoadRowContext,
-  preserveInitialHorizontalCenter = false,
 ): void => {
   const { inputProblem } = context
   const leftToRightPairs = [...groundedLoadPairs].sort(
@@ -133,8 +173,6 @@ const alignGroundedLoadPairRow = (
   const initialGroundPinYs = leftToRightPairs.map((groundedLoadPair) =>
     getGroundPinY(groundedLoadPair, context),
   )
-  const initialRowBounds = getRowBounds(leftToRightPairs, context)
-
   const targetGroundPinY = Math.min(...initialGroundPinYs)
   for (const groundedLoadPair of leftToRightPairs) {
     const groundPinY = getGroundPinY(groundedLoadPair, context)
@@ -166,18 +204,55 @@ const alignGroundedLoadPairRow = (
     )
     previousPairMaxX = pairBounds.maxX + dx
   }
+}
 
-  if (preserveInitialHorizontalCenter) {
-    const alignedRowBounds = getRowBounds(leftToRightPairs, context)
-    const dx =
-      (initialRowBounds.minX +
-        initialRowBounds.maxX -
-        alignedRowBounds.minX -
-        alignedRowBounds.maxX) /
-      2
-    for (const groundedLoadPair of leftToRightPairs) {
-      translateGroundedLoadPair({ groundedLoadPair, dx, dy: 0 }, context)
+const separateChipAnchoredPairs = (
+  groundedLoadPairs: GroundedLoadPair[],
+  context: GroundedLoadRowContext,
+): void => {
+  const { inputProblem } = context
+  const leftToRightPairs = [...groundedLoadPairs].sort(
+    (pairA, pairB) =>
+      getLeftPairEdge(pairA, context) - getLeftPairEdge(pairB, context),
+  )
+  const initialBounds = getRowBounds(leftToRightPairs, context)
+
+  const separatedPairs: GroundedLoadPair[] = []
+  for (const groundedLoadPair of leftToRightPairs) {
+    const pairBounds = getPairBounds(groundedLoadPair, context)
+    let requiredMinX = pairBounds.minX
+    for (const separatedPair of separatedPairs) {
+      const separatedBounds = getPairBounds(separatedPair, context)
+      if (
+        haveVerticalClearance(separatedBounds, pairBounds, inputProblem.chipGap)
+      ) {
+        continue
+      }
+      requiredMinX = Math.max(
+        requiredMinX,
+        separatedBounds.maxX + inputProblem.chipGap,
+      )
     }
+    translateGroundedLoadPair(
+      { groundedLoadPair, dx: requiredMinX - pairBounds.minX, dy: 0 },
+      context,
+    )
+    separatedPairs.push(groundedLoadPair)
+  }
+
+  // Preserve the cluster's original center while retaining every pair's Y.
+  const separatedBounds = getRowBounds(leftToRightPairs, context)
+  const centerOffsetX =
+    (initialBounds.minX +
+      initialBounds.maxX -
+      separatedBounds.minX -
+      separatedBounds.maxX) /
+    2
+  for (const groundedLoadPair of leftToRightPairs) {
+    translateGroundedLoadPair(
+      { groundedLoadPair, dx: centerOffsetX, dy: 0 },
+      context,
+    )
   }
 }
 
@@ -212,10 +287,13 @@ export const alignGroundedLoadPairRows = ({
     for (const rowPairs of pairsByMainChip.values()) {
       if (rowPairs.length < MINIMUM_PAIRS_PER_ROW) continue
       const isChipAnchoredRow = rowPairs[0]!.mainChipId !== undefined
-      if (isChipAnchoredRow && !rowHasOverlappingPairs(rowPairs, context)) {
+      if (!isChipAnchoredRow) {
+        alignGroundedLoadPairRow(rowPairs, context)
         continue
       }
-      alignGroundedLoadPairRow(rowPairs, context, isChipAnchoredRow)
+      for (const collisionGroup of getPairCollisionGroups(rowPairs, context)) {
+        separateChipAnchoredPairs(collisionGroup, context)
+      }
     }
   }
 }

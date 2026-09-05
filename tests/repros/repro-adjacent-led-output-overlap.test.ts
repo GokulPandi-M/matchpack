@@ -21,7 +21,7 @@ test("adjacent LED output branches remain collision-free", async () => {
     (groundedLoadPair) => groundedLoadPair.mainChipId,
   )
   expect(outputPairs).toHaveLength(3)
-  const lowerPlacementYs = outputPairs.map((groundedLoadPair) => {
+  for (const groundedLoadPair of outputPairs) {
     const upperPlacement =
       outputLayout.chipPlacements[groundedLoadPair.upperChip.chipId]!
     const lowerPlacement =
@@ -30,11 +30,7 @@ test("adjacent LED output branches remain collision-free", async () => {
     expect(Math.abs(upperPlacement.x - lowerPlacement.x)).toBeLessThanOrEqual(
       input.chipGap,
     )
-    return lowerPlacement.y
-  })
-  expect(
-    Math.max(...lowerPlacementYs) - Math.min(...lowerPlacementYs),
-  ).toBeCloseTo(0)
+  }
 
   await expect(solver).toMatchSolverSnapshot(import.meta.path, {
     svgWidth: 1200,
